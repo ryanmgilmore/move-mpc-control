@@ -1,7 +1,8 @@
-# Release: on a v* tag, check the tag against src/module.json, run the tests,
-# build move-mpc-control-module.tar.gz, attach it to a GitHub release, and
-# point release.json on main at it (Schwung's Module Store and Schwung
-# Manager's "Install Custom Module > From GitHub URL" read that file).
+# Release: on a v* tag, check the tag against src/module.json and release.json,
+# run the tests, build move-mpc-control-module.tar.gz, and attach it to a
+# GitHub release. release.json (read by Schwung's Module Store and Schwung
+# Manager's "Install Custom Module > From GitHub URL") is updated by hand, with
+# src/module.json, before tagging: the workflow never commits.
 # After Schwung's BUILDING.md; JavaScript only, so no cross-compiler.
 name: Release
 
@@ -44,19 +45,13 @@ jobs:
           files: dist/move-mpc-control-module.tar.gz
           generate_release_notes: true
 
-      - name: Point release.json at this release
+      - name: release.json points at this release
+        # Checked, never written: no bot commits to this repository. Update
+        # release.json together with src/module.json before tagging.
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          git fetch origin main
-          git checkout -f main
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          cat > release.json <<JSON
-          {
-            "version": "${VERSION}",
-            "download_url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/move-mpc-control-module.tar.gz"
-          }
-          JSON
-          git add release.json
-          git commit -m "release.json: ${GITHUB_REF_NAME}" || echo "release.json unchanged"
-          git push origin main
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/move-mpc-control-module.tar.gz"
+          if [ "$(jq -r .version release.json)" != "$VERSION" ] || [ "$(jq -r .download_url release.json)" != "$URL" ]; then
+            echo "release.json must have version $VERSION and download_url $URL before tagging $GITHUB_REF_NAME"
+            exit 1
+          fi
