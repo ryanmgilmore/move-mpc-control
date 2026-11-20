@@ -1,0 +1,132 @@
+{
+  "title": "Move MPC Control",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "MPC 3.10.1+ by USB.",
+        "Needs the MPC",
+        "script, protocol 4.",
+        "Back: menu, Main,",
+        "then parks.",
+        "Back twice: park.",
+        "Shift+Back: quit."
+      ]
+    },
+    {
+      "title": "Sides",
+      "lines": [
+        "Mode: clips/play",
+        "Shift+Mode: clip",
+        "Matrix/Transposed",
+        "Drum track: Pads",
+        "Keys, plugin, MIDI:",
+        "Notes",
+        "Audio, mixer: dark",
+        "Clips need clip",
+        "workflow on MPC."
+      ]
+    },
+    {
+      "title": "Everywhere",
+      "lines": [
+        "Play: start/stop",
+        "S+Play: stop clips",
+        "or continue",
+        "Rec: Overdub",
+        "S+Rec: Record",
+        "Capture: retro rec",
+        "Undo, S+Undo: redo",
+        "Loop: held Repeat",
+        "S+Loop: latch",
+        "Sample: track arm",
+        "Mute: Track Mute,",
+        "Pad Mute, Main",
+        "S+touch volume:",
+        "auto Read/Write",
+        "Jog: track",
+        "S+jog: Q-Link page"
+      ]
+    },
+    {
+      "title": "Shift+Step",
+      "lines": [
+        "1 MPC Main",
+        "2 Setup",
+        "3 MPC Arrange",
+        "5 Tempo on jog",
+        "6 Metronome",
+        "8 Step Seq",
+        "9 Keys & Scales",
+        "10 Full Level",
+        "13 16 Levels",
+        "14 Duplicate clip",
+        "16 Quantise",
+        "Lit glyphs: in use"
+      ]
+    },
+    {
+      "title": "Clips",
+      "lines": [
+        "Pad: launch clip",
+        "Arrows: window",
+        "S+arrows: by page",
+        "Matrix rows:",
+        "launch scene",
+        "Transp rows:",
+        "track, S: stop",
+        "Matrix steps:",
+        "odd select track,",
+        "even stop it",
+        "Transp odd step:",
+        "scene above",
+        "Transp step 16:",
+        "stop all",
+        "Copy: next empty",
+        "S+Copy: scene",
+        "Delete: clip"
+      ]
+    },
+    {
+      "title": "Pads & Notes",
+      "lines": [
+        "Pads L/R: banks",
+        "Notes Up/Down:",
+        "octave",
+        "L/R: root",
+        "S+L/R: scale",
+        "S+Up/Down: channel",
+        "S+Step9: layout",
+        "Steps: beat clock"
+      ]
+    },
+    {
+      "title": "Step Seq",
+      "lines": [
+        "Shift+Step 8",
+        "Steps: on/off",
+        "Pad: lane, MPC's",
+        "current bank",
+        "L/R: bar",
+        "Jog: bars or",
+        "Q-Link page",
+        "S+jog: which",
+        "Back: MPC Main"
+      ]
+    },
+    {
+      "title": "Knobs & menus",
+      "lines": [
+        "Knobs: Q-Links",
+        "Pages: Q1-8, Q9-16,",
+        "Col 1-2, Col 3-4",
+        "Touch: value",
+        "White: assigned",
+        "Red: auto Write",
+        "Menu: jog or U/D",
+        "L/R, click: change",
+        "Mode/Play: close"
+      ]
+    }
+  ]
+}

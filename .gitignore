@@ -1,0 +1,4 @@
+dist/
+.schwung/
+tools/preview/out/
+.DS_Store
