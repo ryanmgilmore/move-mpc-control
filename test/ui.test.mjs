@@ -10,7 +10,7 @@ import { nearestIndex, dimIndex } from "../src/lib/palette.mjs";
 const HELLO = vector("move_to_mpc", "hello").wire;
 const PING = vector("move_to_mpc", "ping").wire;
 const BYE = vector("move_to_mpc", "bye").wire;
-const WELCOME = vector("mpc_to_move", "welcome v4, clip workflow available").wire;
+const WELCOME = vector("mpc_to_move", "welcome v5, clip workflow available").wire;
 const count = (msgs, w) => msgs.filter((m) => eq(m, w)).length;
 
 /* Move hardware messages, as onMidiMessageInternal receives them. */
@@ -354,7 +354,7 @@ Deno.test("ui: GOODBYE: 'No MPC', MPC-driven LEDs cleared, HELLO retried", async
 });
 
 Deno.test("ui: WELCOME with an unknown version: 'MPC script too new/old', no pings", async () => {
-    for (const [ver, word] of [[5, "too new"], [3, "too old"], [2, "too old"], [1, "too old"]]) {
+    for (const [ver, word] of [[6, "too new"], [4, "too old"], [3, "too old"], [2, "too old"], [1, "too old"]]) {
         await withUi(async (h) => {
             h.init(); h.tick();
             h.sysex([0xF0, 0x7D, 0x4D, 0x50, 0x41, ver, 0, 0xF7]);
@@ -378,11 +378,14 @@ Deno.test("ui: SysEx reassembly through onMidiMessageExternal: realtime packets,
         h.tick();
         assert.ok(h.screen().includes("Drum 001"), h.screen());
         assert.equal(h.state().conn, "connected", "any valid message counts as hearing the MPC");
-        /* a channel-voice message mid-SysEx aborts it */
+        /* a channel-voice fragment mid-SysEx (USB-A, or an MPC track routed to
+         * the Move: cable 2 is shared) is set aside, so the MPC's message survives */
         const t2 = [0xF0, 0x7D, 0x4D, 0x50, 0x46, 0, 0x58, 0x59, 0xF7];
         h.external(t2.slice(0, 3), [0x92, 60, 100], t2.slice(3, 6), t2.slice(6, 9));
-        h.tick();
-        assert.ok(h.screen().includes("Drum 001"), h.screen());
+        h.run(3000);
+        assert.ok(h.screen().includes("XY"), h.screen());
+        assert.equal(h.state().stats.extVoice, 1);
+        h.sysex(w); h.tick();
         /* an over-long message is dropped */
         h.sysex([0xF0, 0x7D, 0x4D, 0x50, 0x46, 0, ...new Array(80).fill(0x5A), 0xF7]);
         h.tick();
@@ -497,7 +500,7 @@ Deno.test("ui: Notes mode plays ordinary notes in key, releases correctly, draws
         h.internal(HW.padOff(1));
         /* channel, root, scale, layout */
         h.internal(HW.shiftOn, [0xB0, 55, 127], [0xB0, 55, 0], HW.shiftOff);   /* channel 2 */
-        h.internal([0xB0, 63, 127], [0xB0, 63, 0], [0xB0, 63, 127], [0xB0, 63, 0]);   /* root D */
+        h.internal(HW.shiftOn, [0xB0, 63, 127], [0xB0, 63, 0], [0xB0, 63, 127], [0xB0, 63, 0], HW.shiftOff);   /* root D (Shift + Right) */
         shiftStep(h, 8); h.internal(HW.cc(54),HW.cc(54,0),HW.cc(54),HW.cc(54,0),HW.cc(63),HW.cc(63,0),HW.cc(50),HW.cc(50,0));                                                       /* chromatic */
         const m3 = h.mark();
         h.internal(HW.padOn(1), HW.padOff(1));
@@ -688,7 +691,7 @@ Deno.test("ui: duplicate Notes pitches release only their last holder", async ()
 Deno.test("ui: realtime at callback start preserves following SysEx bytes", async () => {
     await withUi(async (h) => {
         h.init();
-        h.external([0xF8, 0xF0, 0x7D], [0xF8, 0x4D, 0x50], [0x41, 4, 1], [0xF8, 0xF7, 0]);
+        h.external([0xF8, 0xF0, 0x7D], [0xF8, 0x4D, 0x50], [0x41, 5, 1], [0xF8, 0xF7, 0]);
         assert.equal(h.state().conn, "connected");
     });
 });
@@ -1067,8 +1070,8 @@ Deno.test('ui v4: bar arrows retain held Pads and Notes; PADS colours survive St
     });
 });
 
-Deno.test('ui v4: v1-v3 WELCOME mismatch vectors stop the session', async () => {
-    for (const ver of [1,2,3]) await withUi(async h => {
+Deno.test('ui v5: v1-v4 WELCOME mismatch vectors stop the session', async () => {
+    for (const ver of [1,2,3,4]) await withUi(async h => {
         h.init(); h.sysex(VECTORS.version_mismatch['welcome_v'+ver]); h.run(40);
         assert.equal(h.state().conn,'version');
         assert.ok(h.screen().replaceAll('\n',' ').includes('MPC script too old'));
@@ -1460,5 +1463,316 @@ Deno.test("ui: settings saved under the working name are read once when the rena
             assert.equal(st.qlinkList, true); assert.equal(st.quantAlways, true);
             assert.ok(reads[0].includes("/tools/move-mpc-control/config.json"), "the new path first: " + reads[0]);
         } finally { delete globalThis.host_read_file; }
+    });
+});
+
+/* ---------------- protocol v5: note entry and clip creation (§12) ---------------- */
+
+const SYSEX = (...b) => [0xF0, 0x7D, 0x4D, 0x50, ...b, 0xF7];
+const NOTE_STEPS = (bar, on, cov) => {
+    const bits = (l) => l.reduce((a, i) => a | (1 << i), 0);
+    const tri = (v) => [v & 127, (v >> 7) & 127, (v >> 14) & 127];
+    return SYSEX(0x4B, bar, ...tri(bits(on)), ...tri(bits(cov)));
+};
+const stepLed = (h, i) => lastLed(h, "note", 16 + i)[3];
+const stepSeqMode = (h) => { const w = [0xF0,0x7D,0x4D,0x50,0x42,3,0,0,0,0,0,16,32,15,0,1,15,48,9,1,0xF7]; h.sysex(w); };
+const LEFT = (h) => h.internal(HW.cc(62), HW.cc(62, 0));
+const RIGHT = (h) => h.internal(HW.cc(63), HW.cc(63, 0));
+async function notesUi(h) { await connected(h); modelMode(h, 3); h.run(600); }
+
+Deno.test("ui v5: Notes Left/Right page the bar (clamped), send NOTE_BAR, show Bar n and say it", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        LEFT(h);
+        assert.deepEqual(h.sent(m), [], "bar 1 is the floor: nothing sent");
+        RIGHT(h); RIGHT(h);
+        assert.deepEqual(h.sent(m), [SYSEX(0x14, 1), SYSEX(0x14, 2)]);
+        h.run(400);
+        assert.ok(h.screen().includes("Bar 3"), h.screen());
+        assert.equal(h.spoken.at(-1), "Bar 3");
+        for (let i = 0; i < 10; i++) RIGHT(h);
+        assert.equal(h.state().noteBar, 7);
+        assert.deepEqual(h.sent(m).at(-1), SYSEX(0x14, 7));
+        assert.equal(h.sent(m).filter((x) => x[4] === 0x14).length, 7, "no NOTE_BAR past bar 8");
+        assert.equal(h.state().notes.root, 0, "plain arrows no longer move the root");
+    });
+});
+
+Deno.test("ui v5: Notes root is Shift + Left/Right, scale only in the menu, octave and channel unchanged", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        h.internal(HW.shiftOn, HW.cc(63), HW.cc(63, 0), HW.shiftOff);
+        assert.equal(h.state().notes.root, 1);
+        h.internal(HW.shiftOn, HW.cc(62), HW.cc(62, 0), HW.cc(62), HW.cc(62, 0), HW.shiftOff);
+        assert.equal(h.state().notes.root, 11, "wraps");
+        assert.equal(h.state().notes.scale, 0, "Shift + arrows never touch the scale");
+        assert.equal(h.state().noteBar, 0);
+        const oct0 = h.state().notes.octave;
+        h.internal(HW.cc(55), HW.cc(55, 0));
+        assert.equal(h.state().notes.octave, oct0 + 1);
+        h.internal(HW.shiftOn, HW.cc(55), HW.cc(55, 0), HW.shiftOff);
+        assert.equal(h.state().notes.channel, 2);
+        assert.equal(h.sent(m).filter((x) => x[0] === 0xF0 && x[4] === 0x14).length, 0, "no NOTE_BAR from any of these");
+    });
+});
+
+Deno.test("ui v5: a held step, then a pad, sends NOTE_ADD with the pad's note and velocity, and the pad sounds", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        h.internal(HW.stepOn(5));
+        assert.deepEqual(h.sent(m), [], "a step press sends nothing by itself");
+        h.internal(HW.padOn(0, 90));
+        assert.deepEqual(h.sent(m), [[0x90, 48, 90], SYSEX(0x10, 5, 0, 48, 90)]);
+        h.internal(HW.padOn(1, 70));
+        assert.deepEqual(h.sent(m).at(-1), SYSEX(0x10, 5, 0, 50, 70));
+        h.internal(HW.stepOff(5));
+        assert.equal(h.sent(m).some((x) => x[4] === 0x13), false, "a used hold does not clear");
+        h.internal(HW.padOff(0), HW.padOff(1));
+    });
+});
+
+Deno.test("ui v5: pads without a held step send only the note; the step button sends no CC in Notes", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        h.internal(HW.padOn(0, 90), HW.padOff(0));
+        assert.deepEqual(h.sent(m), [[0x90, 48, 90], [0x80, 48, 0]]);
+        const m2 = h.mark();
+        h.internal(HW.stepOn(2)); h.internal(HW.stepOff(2));
+        assert.equal(h.sent(m2).some((x) => x[0] === 0xBF), false);
+    });
+});
+
+Deno.test("ui v5: tapping a step clears it; a hold that did something does not", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        h.internal(HW.stepOn(5), HW.stepOff(5));
+        assert.deepEqual(h.sent(m), [SYSEX(0x13, 5, 0)]);
+        const m2 = h.mark();
+        h.internal(HW.stepOn(6)); h.internal(HW.cc(14, 1)); h.internal(HW.stepOff(6));
+        assert.deepEqual(h.sent(m2), [SYSEX(0x12, 6, 0, 1)], "a jog click is a use");
+        const m3 = h.mark();
+        h.internal(HW.stepOn(7), HW.stepOn(9), HW.stepOff(9), HW.stepOff(7));
+        assert.deepEqual(h.sent(m3), [SYSEX(0x11, 7, 0, 3)], "a length is a use; the later step clears nothing");
+    });
+});
+
+Deno.test("ui v5: the jog nudges a held step's length by one click and does not change track", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        h.internal(HW.stepOn(5));
+        const m = h.mark();
+        h.internal(HW.cc(14, 1), HW.cc(14, 127));
+        assert.deepEqual(h.sent(m), [SYSEX(0x12, 5, 0, 1), SYSEX(0x12, 5, 0, 127)]);
+        assert.equal(h.sent(m).some((x) => x[0] === 0xBF), false, "no TRACK_NEXT / TRACK_PREV");
+        h.internal(HW.stepOff(5));
+        const m2 = h.mark();
+        h.internal(HW.cc(14, 1));
+        assert.deepEqual(h.sent(m2), [[0xBF, 0x0B, 127], [0xBF, 0x0B, 0]], "the jog is the track again");
+    });
+});
+
+Deno.test("ui v5: a later step sets the length; only the first held step is the target", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        h.internal(HW.stepOn(4), HW.stepOn(8));
+        assert.deepEqual(h.sent(m), [SYSEX(0x11, 4, 0, 5)], "step 8 is length 5 from step 4");
+        h.internal(HW.stepOn(2));
+        assert.equal(h.sent(m).length, 1, "a step to the left of the target does nothing");
+        h.internal(HW.padOn(0, 80));
+        assert.deepEqual(h.sent(m).at(-1), SYSEX(0x10, 4, 0, 48, 80), "pads still go to the first step");
+        h.internal(HW.stepOff(8), HW.stepOff(2), HW.stepOff(4), HW.padOff(0));
+        assert.equal(h.sent(m).some((x) => x[4] === 0x13), false);
+    });
+});
+
+Deno.test("ui v5: pads held first are added when the step goes down, and count as use", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        h.internal(HW.padOn(0, 90), HW.padOn(2, 60));
+        const m = h.mark();
+        h.internal(HW.stepOn(3));
+        assert.deepEqual(h.sent(m), [SYSEX(0x10, 3, 0, 48, 90), SYSEX(0x10, 3, 0, 52, 60)]);
+        h.internal(HW.stepOff(3));
+        assert.equal(h.sent(m).length, 2, "released without a clear");
+        h.internal(HW.padOff(0), HW.padOff(2));
+    });
+});
+
+Deno.test("ui v5: paging a bar keeps the held step's absolute index", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        RIGHT(h);                       /* bar 2 */
+        h.internal(HW.stepOn(5));
+        RIGHT(h);                       /* bar 3, step still down */
+        const m = h.mark();
+        h.internal(HW.padOn(0, 100));
+        assert.deepEqual(h.sent(m).at(-1), SYSEX(0x10, 21, 0, 48, 100), "bar 2 step 6 is absolute 21");
+        h.internal(HW.stepOn(1));
+        assert.deepEqual(h.sent(m).at(-1), SYSEX(0x11, 21, 0, 13), "the later step is read on the shown bar: absolute 33, length 13");
+        h.internal(HW.padOff(0), HW.stepOff(1), HW.stepOff(5));
+        const m2 = h.mark();
+        h.internal(HW.stepOn(0), HW.stepOff(0));
+        assert.deepEqual(h.sent(m2), [SYSEX(0x13, 32, 0)], "a fresh tap on bar 3 is absolute 32");
+    });
+});
+
+Deno.test("ui v5: step LEDs follow NOTE_STEPS for the shown bar: on, covered, held; other bars ignored", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        h.run(400);
+        for (let i = 0; i < 16; i++) assert.equal(stepLed(h, i), 0, "dark before any NOTE_STEPS");
+        h.sysex(NOTE_STEPS(0, [0, 8], [9, 10, 11]));
+        h.run(600);
+        assert.equal(stepLed(h, 0), 122); assert.equal(stepLed(h, 8), 122);
+        for (const i of [9, 10, 11]) assert.equal(stepLed(h, i), 118);
+        assert.equal(stepLed(h, 1), 0); assert.equal(stepLed(h, 12), 0);
+        h.sysex(NOTE_STEPS(1, [3], []));
+        h.run(600);
+        assert.equal(stepLed(h, 3), 0, "bar 2's reply is not drawn on bar 1");
+        assert.equal(stepLed(h, 0), 122);
+        h.internal(HW.stepOn(10));
+        h.run(600);
+        assert.equal(stepLed(h, 10), 120, "held: bright white");
+        h.internal(HW.stepOff(10));
+        h.run(600);
+        assert.equal(stepLed(h, 10), 118);
+        RIGHT(h); h.run(600);
+        for (let i = 0; i < 16; i++) assert.equal(stepLed(h, i), 0, "paging blanks until the MPC answers");
+        h.sysex(NOTE_STEPS(1, [3], [4]));
+        h.run(600);
+        assert.equal(stepLed(h, 3), 122); assert.equal(stepLed(h, 4), 118);
+    });
+});
+
+Deno.test("ui v5: a held step is lit on its own bar only, wherever the page is", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        h.internal(HW.stepOn(2));
+        RIGHT(h); h.run(600);
+        assert.equal(stepLed(h, 2), 0, "the held step is on bar 1, which is not shown");
+        LEFT(h); h.run(600);
+        assert.equal(stepLed(h, 2), 120);
+    });
+});
+
+Deno.test("ui v5: Step Seq keeps v4 step buttons and Notes entry does not apply with Shift or a menu", async () => {
+    await withUi(async (h) => {
+        await connected(h); stepSeqMode(h); h.tick();
+        const m = h.mark();
+        h.internal(HW.stepOn(5), HW.stepOff(5));
+        assert.deepEqual(h.sent(m), [[0xBF, 0x25, 127], [0xBF, 0x25, 0]]);
+        const m2 = h.mark();
+        h.internal(HW.padOn(0)); h.internal(HW.stepOn(5)); h.internal(HW.cc(63), HW.cc(63, 0));
+        assert.equal(h.sent(m2).some((x) => x[0] === 0xF0), false, "no v5 SysEx in Step Seq");
+        h.internal(HW.padOff(0), HW.stepOff(5));
+    });
+    await withUi(async (h) => {
+        await notesUi(h);
+        const m = h.mark();
+        shiftStep(h, 5);       /* Shift + Step 6: metronome, as before */
+        assert.equal(h.sent(m).some((x) => x[0] === 0xF0), false);
+        shiftStep(h, 8);       /* Keys & Scales menu */
+        const m2 = h.mark();
+        h.internal(HW.stepOn(3), HW.stepOff(3));
+        assert.deepEqual(h.sent(m2), [[0xBF, 0x23, 127], [0xBF, 0x23, 0]], "with a menu open a step is a step again");
+    });
+});
+
+Deno.test("ui v5: leaving Notes mode drops any step hold without a clear", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        h.internal(HW.stepOn(5));
+        modelMode(h, 0);
+        const m = h.mark();
+        h.internal(HW.stepOff(5));
+        assert.deepEqual(h.sent(m), []);
+    });
+});
+
+Deno.test("ui v5: a second press of one clip pad inside 400 ms sends CLIP_CREATE after its pad message", async () => {
+    for (const mode of [0, 1]) await withUi(async (h) => {
+        await connected(h); modelMode(h, mode);
+        const m = h.mark();
+        h.internal(HW.padOn(24)); h.internal(HW.padOff(24));
+        assert.deepEqual(h.sent(m), [[0x9F, h.sent(m)[0][1], 100], [0x8F, h.sent(m)[0][1], 0]]);
+        assert.equal(h.sent(m).some((x) => x[0] === 0xF0), false, "once is a launch");
+        h.run(200);
+        h.internal(HW.padOn(24));
+        const sent = h.sent(m);
+        assert.equal(sent.at(-2)[0], 0x9F, "the pad message comes first");
+        assert.deepEqual(sent.at(-1), SYSEX(0x15, 24));
+        h.internal(HW.padOff(24));
+        h.run(100);
+        h.internal(HW.padOn(24));
+        assert.equal(sent.length + 1 + 1, h.sent(m).length, "a third tap sends only its pad message");
+        h.internal(HW.padOff(24));
+    });
+});
+
+Deno.test("ui v5: double tap needs the same pad and 400 ms or less; Pads and Notes never create clips", async () => {
+    await withUi(async (h) => {
+        await connected(h); modelMode(h, 0);
+        const m = h.mark();
+        h.internal(HW.padOn(3)); h.internal(HW.padOff(3)); h.run(500);
+        h.internal(HW.padOn(3)); h.internal(HW.padOff(3));
+        h.internal(HW.padOn(4)); h.internal(HW.padOff(4));
+        h.run(100);
+        h.internal(HW.padOn(3)); h.internal(HW.padOff(3));
+        assert.equal(h.sent(m).some((x) => x[0] === 0xF0), false, "slow, or a different pad between: no create");
+    });
+    for (const mode of [2, 3]) await withUi(async (h) => {
+        await connected(h); modelMode(h, mode);
+        const m = h.mark();
+        h.internal(HW.padOn(3)); h.internal(HW.padOff(3)); h.internal(HW.padOn(3)); h.internal(HW.padOff(3));
+        assert.equal(h.sent(m).some((x) => x[0] === 0xF0), false);
+    });
+});
+
+Deno.test("ui v5: a resumed or reconnected MPC is told the Move's bar again", async () => {
+    await withUi(async (h) => {
+        await notesUi(h);
+        RIGHT(h); RIGHT(h);
+        h.sysex(vector("mpc_to_move", "goodbye").wire); h.tick();
+        const m = h.mark();
+        h.sysex(WELCOME); h.tick();
+        assert.ok(h.sent(m).some((x) => eq(x, SYSEX(0x14, 2))));
+    });
+});
+
+Deno.test('Step Seq header shows the knobs\' parameter from the Q-Link names, in place of the view (Ryan, 2026-11-24)', async () => {
+    await withUi(async h => {
+        await connected(h); modelMode(h,2);
+        h.sysex(vector('mpc_to_move','state: Step Seq in Pads, navigation left+right').wire); h.tick(); h.run(40);
+        assert.ok(h.screen().startsWith("Step Seq  Pads "), h.screen());   /* no names yet: the view */
+        const qlink = (k, name, value) => h.sysex([0xF0,0x7D,0x4D,0x50,0x47,k,...[...name].map(c=>c.charCodeAt(0)),0,...[...value].map(c=>c.charCodeAt(0)),0xF7]);
+        for (let k = 0; k < 8; k++) qlink(k, `STEP ${k+1} RATCHET`, "OFF");
+        h.tick(); h.run(40);
+        assert.ok(h.screen().startsWith("Step Seq  Ratchet"), h.screen());
+        for (let k = 0; k < 8; k++) qlink(k, `STEP ${k+1} PROBABILITY`, "100%");
+        h.tick(); h.run(40);
+        assert.ok(h.screen().startsWith("Step Seq  Prob.\n"), h.screen());
+        for (let k = 0; k < 8; k++) qlink(k, `STEP ${k+1} VELOCITY`, "100%");
+        h.tick(); h.run(40);
+        assert.ok(h.screen().startsWith("Step Seq  Velocity\n"), h.screen());   /* fits uncut */
+        assert.equal(h.state().stats.errors, 0);
+    });
+});
+
+Deno.test('v5 step entry works on any MPC screen but Step Seq and the mute modes (first v5 bench: Grid View is mpcMode 4)', async () => {
+    await withUi(async h => {
+        await connected(h); modelMode(h,3);
+        for (const [mm, expect] of [[4, true], [0, true], [1, false], [2, false], [3, false]]) {
+            h.state().mpcMode = mm;
+            const m = h.mark();
+            h.internal([0x90, 16 + 2, 127], [0x90, 80, 100], [0x80, 80, 0], [0x80, 16 + 2, 0]);
+            const adds = h.sent(m).filter(x => x[0] === 0xF0 && x[4] === 0x10);
+            assert.equal(adds.length > 0, expect, 'mpcMode ' + mm);
+        }
     });
 });

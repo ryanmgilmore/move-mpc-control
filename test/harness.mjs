@@ -50,6 +50,8 @@ export function loadUi() {
             ? (v.endsWith('/font.png') ? 'default' : v.split('/').at(-1).replace('.png','')) : v));
     }
     globalThis.host_exit_module = () => { h.exited++; };
+    h.spoken = [];    /* every screen-reader announcement, in order */
+    globalThis.host_send_screenreader = (text) => { h.spoken.push(text); };
     delete globalThis.host_suspend_overtake;
     delete globalThis.overtakeParked;
     Date.now = () => h.t;

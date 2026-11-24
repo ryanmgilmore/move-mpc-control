@@ -70,6 +70,7 @@ names the window's tracks and scenes, for example `T1-8 S1-4`.
 | Control | Does |
 |---|---|
 | Pad | Select and launch that clip |
+| Pad twice, quickly | On an empty slot: make a new clip there, at the MPC's default clip length (as on the MPC's own clip matrix) |
 | Left / Right / Up / Down | Move the window by one track or scene. In Transposed, Left / Right go through clips and Up / Down through tracks |
 | Shift + arrows | Move the window by a whole page |
 | Row buttons | Matrix: launch that scene. Transposed: select that track |
@@ -148,10 +149,29 @@ off, and the notes follow the current track.
 | Control | Does |
 |---|---|
 | Up / Down | Octave |
-| Left / Right | Root note |
-| Shift + Left / Right | Scale |
+| Left / Right | Bar for step entry, 1-8 (shown bottom right) |
+| Shift + Left / Right | Root note |
 | Shift + Up / Down | MIDI channel, 1-15 |
 | Shift + Step 9 | Keys & Scales: root, scale, In-Key or Chromatic |
+
+### Putting notes on steps
+
+The 16 steps are the sixteenths of the bar shown bottom right. Notes go into
+the MPC's selected clip (in the sequence workflow, the track's sequence).
+
+| Control | Does |
+|---|---|
+| Hold a step, play pads | Put those notes on that step, one step long, at the velocity you played |
+| Hold pads, then press a step | The same |
+| Hold a step, turn the jog | Length, one step per click |
+| Hold a step, press a later step | The note lasts to that step |
+| Tap a step | Clear the notes put there from the Move |
+
+Steps with notes from the Move light white, and the steps a long note covers
+dim. Only notes put there from the Move this MPC session can be lengthened or
+cleared from the Move, and notes changed on the MPC afterwards no longer
+answer. Every note is its own MPC Undo. A note past the clip's end is written
+but does not play: the Move cannot read a clip's length.
 
 Scales: Major, Minor, Dorian, Mixolydian, Lydian, Phrygian, Locrian, Harmonic
 Minor, Melodic Minor, Major Pentatonic, Minor Pentatonic, Blues. When the
@@ -175,6 +195,23 @@ shows on the steps.
 
 The display shows `Lane: A01` bottom left once a lane is picked, and the Jog
 Dial setting bottom right.
+
+### Velocity, ratchet, and probability
+
+In Step Seq the knobs set one parameter for each step: knobs 1-8 for steps
+1-8 on Q-Link page 1, and for steps 9-16 on page 2. **Which parameter is
+chosen on the MPC's own Step Seq screen** (Velocity, Ratchet, Probability,
+and others); the Move cannot change it. The top line of the Move's screen names
+it, for example `Step Seq  Ratchet`, and touching a knob shows its step and
+value.
+
+- **Velocity:** how hard the step plays.
+- **Ratchet:** the step plays several times in quick succession instead of
+  once (OFF, or a count up to 8): rolls and stutters.
+- **Probability:** how likely the step is to play each time round (100% always).
+
+Ratchet and probability work on any drum kit, since the MPC itself edits the
+step.
 
 ## Knobs
 

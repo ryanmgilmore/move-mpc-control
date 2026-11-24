@@ -56,6 +56,14 @@ const ENCODED = {
     "SIXTEEN_LEVEL shifted step": P.encodeButton(P.CC.STEP0+12, true),
     "FULL_LEVEL shifted step": P.encodeButton(P.CC.STEP0+9, true),
     "TEMPO": P.encodeValue(P.CC.TEMPO, 1),
+    "NOTE_ADD C3 vel 100 at step 5 (bar 1)": P.encodeNoteAdd(5, 60, 100),
+    "NOTE_ADD E3 vel 127 at step 120 (bar 8, step 9)": P.encodeNoteAdd(120, 64, 127),
+    "NOTE_LENGTH step 5 to 4 steps": P.encodeNoteLength(5, 4),
+    "NOTE_LENGTH_NUDGE step 5 one longer": P.encodeNoteLengthNudge(5, 1),
+    "NOTE_LENGTH_NUDGE step 5 one shorter": P.encodeNoteLengthNudge(5, -1),
+    "NOTE_CLEAR step 5": P.encodeNoteClear(5),
+    "NOTE_BAR 3 (bar 4)": P.encodeNoteBar(3),
+    "CLIP_CREATE pad 24": P.encodeClipCreate(24),
 };
 
 Deno.test("protocol: every move_to_mpc vector has an encoder and matches byte-exactly", () => {
@@ -81,8 +89,8 @@ Deno.test("protocol: every mpc_to_move vector decodes, to 'decoded' where given"
 });
 
 Deno.test("protocol: specific decodes", () => {
-    assert.deepEqual(P.decode(vector("mpc_to_move", "welcome v4, clip workflow available").wire),
-        { type: "welcome", ver: 4, flags: 1, clipWorkflow: true });
+    assert.deepEqual(P.decode(vector("mpc_to_move", "welcome v5, clip workflow available").wire),
+        { type: "welcome", ver: 5, flags: 1, clipWorkflow: true });
     const rows = P.decode(vector("mpc_to_move", "rows: white, off, off, blue blink").wire);
     assert.deepEqual(rows.rows[0], { r: 127, g: 127, b: 127, anim: 0 });
     assert.deepEqual(rows.rows[3], { r: 0, g: 0, b: 127, anim: 3 });
@@ -91,6 +99,15 @@ Deno.test("protocol: specific decodes", () => {
     assert.deepEqual(steps.steps, [{ r: 127, g: 127, b: 127, anim: 1 }, { r: 0, g: 0, b: 0, anim: 0 }]);
     assert.equal(P.decode(vector("mpc_to_move", "goodbye").wire).type, "goodbye");
     assert.deepEqual(P.decode(vector("mpc_to_move", "pong").wire), { type: "pong" });
+});
+
+Deno.test("protocol: NOTE_STEPS bitmaps, malformed and out-of-range input", () => {
+    const H = [0xF0, 0x7D, 0x4D, 0x50, 0x4B];
+    assert.deepEqual(P.decode([...H, 2, 0x7F, 0x7F, 3, 0, 0, 0, 0xF7]),
+        { type: "note_steps", bar: 2, on: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], cov: [] }, "all 16 bits");
+    assert.equal(P.decode([...H, 8, 0, 0, 0, 0, 0, 0, 0xF7]), null, "bar 8");
+    assert.equal(P.decode([...H, 0, 0, 0, 0, 0, 0, 0xF7]), null, "short");
+    assert.deepEqual(P.encodeNoteAdd(130, 60, 0), [0xF0, 0x7D, 0x4D, 0x50, 0x10, 2, 1, 60, 1, 0xF7], "s1 carries step >= 128; vel floor 1");
 });
 
 Deno.test("protocol: unknown, reserved, short and foreign messages decode to null", () => {
@@ -126,7 +143,7 @@ Deno.test("protocol: TEXT is capped at 40 chars, QLINK name 20 / value 16, non-p
 
 Deno.test("usb: HELLO packets are exactly what the probe sent on the device", () => {
     assert.deepEqual(sysexPackets(P.encodeHello()),
-        [0x04, 0xF0, 0x7D, 0x4D, 0x04, 0x50, 0x01, 0x04, 0x06, 0x00, 0xF7, 0x00]);
+        [0x04, 0xF0, 0x7D, 0x4D, 0x04, 0x50, 0x01, 0x05, 0x06, 0x00, 0xF7, 0x00]);
     assert.deepEqual(sysexPackets(P.encodePing()), [0x04, 0xF0, 0x7D, 0x4D, 0x07, 0x50, 0x02, 0xF7]);
     assert.deepEqual(sysexPackets([0xF0, 1, 2, 3, 0xF7]), [0x04, 0xF0, 1, 2, 0x06, 3, 0xF7, 0]);
     assert.deepEqual(sysexPackets([0xF0, 1, 2, 0xF7]), [0x04, 0xF0, 1, 2, 0x05, 0xF7, 0, 0]);

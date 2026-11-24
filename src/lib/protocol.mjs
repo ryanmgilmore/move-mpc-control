@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ryan Gilmore
-/* Move MPC Control wire protocol v4, the Move side. The wire protocol is the contract;
+/* Move MPC Control wire protocol v5, the Move side. The wire protocol is the contract;
  * this file only encodes what it says. Pure: no host globals.
  *
  * Every function here returns WIRE bytes (a full MIDI message, F0..F7 for
  * SysEx). Turning them into USB-MIDI packets is usb.mjs's job. */
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 export const HEADER = [0x7D, 0x4D, 0x50];          /* 7D non-commercial, "MP" */
 export const MOVE_CH = 0x0F;                        /* channel 16, 0-based */
 
@@ -14,6 +14,13 @@ export const MOVE_CH = 0x0F;                        /* channel 16, 0-based */
 export const CMD_HELLO = 0x01;
 export const CMD_PING = 0x02;
 export const CMD_BYE = 0x03;
+/* v5 note entry (§12.2) */
+export const CMD_NOTE_ADD = 0x10;
+export const CMD_NOTE_LENGTH = 0x11;
+export const CMD_NOTE_LENGTH_NUDGE = 0x12;
+export const CMD_NOTE_CLEAR = 0x13;
+export const CMD_NOTE_BAR = 0x14;
+export const CMD_CLIP_CREATE = 0x15;
 
 /* ---- MPC -> Move SysEx commands (§3) ---- */
 export const CMD_WELCOME = 0x41;
@@ -26,6 +33,7 @@ export const CMD_QLINK = 0x47;
 export const CMD_GOODBYE = 0x48;
 export const CMD_PONG = 0x49;
 export const CMD_POSITION = 0x4A;
+export const CMD_NOTE_STEPS = 0x4B;
 
 /* ---- Move -> MPC command CCs (§2.3) ---- */
 export const CC = Object.freeze({
@@ -69,6 +77,16 @@ export const encodeSetMode = (m) => encodeValue(CC.SET_MODE, m);
 export const encodeSetQlinkPage = (pg) => encodeValue(CC.SET_QLINK_PAGE, pg);
 export const encodeSetPadBank = (b) => encodeValue(CC.SET_PAD_BANK, b);
 export const encodeRefresh = () => encodeValue(CC.REFRESH, 0x7F);
+
+/* v5 note entry (§12.2). `step` is absolute, 0-127, sent as unsigned
+ * little-endian 2x7 bits (s0 s1). */
+const step14 = (s) => [s & 0x7F, (s >> 7) & 0x7F];
+export const encodeNoteAdd = (step, note, vel) => sysex(CMD_NOTE_ADD, [...step14(step), d7(note), Math.max(1, d7(vel))]);
+export const encodeNoteLength = (step, len) => sysex(CMD_NOTE_LENGTH, [...step14(step), Math.max(1, d7(len))]);
+export const encodeNoteLengthNudge = (step, delta) => sysex(CMD_NOTE_LENGTH_NUDGE, [...step14(step), delta & 0x7F]);
+export const encodeNoteClear = (step) => sysex(CMD_NOTE_CLEAR, step14(step));
+export const encodeNoteBar = (bar) => sysex(CMD_NOTE_BAR, [Math.max(0, Math.min(7, bar | 0))]);
+export const encodeClipCreate = (pad) => sysex(CMD_CLIP_CREATE, [d7(pad)]);
 
 /* Notes mode: ordinary notes on the user's channel (0-based 0..14). */
 export const encodeNoteOn = (ch, note, vel) => [0x90 | (ch & 0x0F), d7(note), Math.max(1, d7(vel))];
@@ -148,6 +166,16 @@ export function decode(msg) {
             return { type: "position", position: d[0] + d[1]*128 + d[2]*16384 + d[3]*2097152,
                 length: d[4] + d[5]*128 + d[6]*16384 + d[7]*2097152,
                 numerator: d[8], denominator: d[9] };
+        case CMD_NOTE_STEPS: {
+            if (d.length < 7 || d[0] > 7) return null;
+            const bits = (o) => {
+                const v = d[o] | (d[o + 1] << 7) | (d[o + 2] << 14);
+                const out = [];
+                for (let i = 0; i < 16; i++) if (v & (1 << i)) out.push(i);
+                return out;
+            };
+            return { type: "note_steps", bar: d[0], on: bits(1), cov: bits(4) };
+        }
         case CMD_PONG:
             return { type: "pong" };
         case CMD_GOODBYE:

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Ryan Gilmore
 /* Move MPC Control: the Move as clip launcher, pads and Q-Link knobs for an Akai MPC.
- * The Move half of the wire protocol, version 4. A Schwung overtake tool, JS only.
+ * The Move half of the wire protocol (v5). A Schwung overtake tool, JS only.
  *
  * The MPC script is the model and this is the view: it sends raw control
  * events on channel 16 and draws what the MPC tells it. Notes mode is the one
@@ -21,6 +21,11 @@ import { createLedEngine, specFor, solid, noteKey, ccKey } from "./lib/leds.mjs"
 import * as N from "./lib/notes.mjs";
 import * as L from "./lib/layout.mjs";
 import { drawScreen, drawMenu, drawSetting } from "./lib/screen.mjs";
+/* Schwung's screen reader (in the host since 2026-02, long before our
+ * min_host_version; every catalog module speaks through it). Silent unless
+ * the user has turned the screen reader on. The tests map this path to
+ * test/screen_reader_stub.mjs (deno.json "imports"). */
+import { announce } from "/data/UserData/schwung/shared/screen_reader.mjs";
 
 /* ================= tunables (ui.js, so they change without a restart) ================= */
 
@@ -63,6 +68,9 @@ const CFG = {
     PLAY_ON: 126, PLAY_OFF: 124,
     REC_ON: 127, OVERDUB_ON: 3, REC_OFF: 124,
     SCENE_LABEL_OFFSET: 0,      /* scene label = originY + this; row 0 is the arrangement row */
+    NOTE_LOG: false,            /* step-entry diagnostics to Schwung's debug.log (on for the first v5 bench) */
+    DOUBLE_TAP_MS: 400,         /* §12.4: a second press of one clip pad inside this makes the clip */
+    STEP_ON: 122, STEP_COVERED: 118, STEP_HELD: 120,   /* Notes-mode step lights: palette light grey, dim grey, white */
     WHITE_OFF: 0x00, WHITE_DIM: 0x10, WHITE_MED: 0x40, WHITE_BRIGHT: 0x7C,
 };
 
@@ -117,13 +125,18 @@ function freshState() {
         armed: false, noteRepeat: false, repeatDown: false, metronome: false, automation: 0, available: 0, bpm: 120,
         clipLayout: 0, clockStyle: CFG.CLOCK_STYLE, jogDial: "bars", qlinkList: false, quantAlways: false, popup: false, aux: false, pageListUntil: 0, position: null, menu: null, menuSelected: 0,
         moveChanges: null, moveInfoAt: 0, preferencesLoaded: false,
-        held: new Map(),             /* pad -> {pad:true} | {ch, note} */
+        held: new Map(),             /* pad -> {pad:true} | {ch, note, vel} */
+        noteBar: 0,                  /* Notes mode: the bar (0-7) the steps show */
+        noteSteps: null,             /* last NOTE_STEPS for noteBar: {on, cov} sets of step 0-15 */
+        stepHolds: new Map(),        /* Notes mode: step button -> {abs, target, used} */
+        lastClipPad: { pad: -1, at: -1e9 },
         noteHolders: new Map(),      /* channel:note -> number of held pads */
         pressure: new Map(),         /* pad -> last pressure sent */
         consumed: new Map(),         /* control key -> release message or null */
         notes: N.defaultNotes(),
         tickNo: 0, dirty: true, lastDrawAt: -1e9,
-        stats: { tx: 0, refused: 0, errors: 0, rx: 0, ledWrites: 0 },
+        stats: { tx: 0, refused: 0, errors: 0, rx: 0, ledWrites: 0, extVoice: 0 },
+        speech: [], speechAt: 0, speechSince: 0, said: {}, connSeenAt: 0,   /* screen reader */
     };
 }
 
@@ -145,6 +158,117 @@ function sendLed(pkt) {
 
 function flash(text, t) {
     S.flash = text; S.flashUntil = t + CFG.TRANSIENT_MS; S.dirty = true;
+    say(text);
+}
+
+/* ================= screen reader ================= */
+
+/* The host speaks only the LATEST message once its debounce window (50 ms by
+ * default) has passed: a second announce() inside it replaces the first
+ * (schwung_shim.c, shadow_check_screenreader). So speech is queued and sent
+ * as one sentence once nothing new has been queued for SPEECH_QUIET_MS; the
+ * MPC's replies to one press arrive over several ticks. */
+const SPEECH_QUIET_MS = 80, SPEECH_MAX_HOLD_MS = 400;
+function say(text) {
+    if (!text) return;
+    if (!S.speech.length) S.speechSince = now();
+    S.speech.push(spoken(String(text)));
+    S.speechAt = now();
+}
+function spoken(s) {
+    return s.replace(/^!/, "").replace(/([A-G])#/g, "$1 sharp").replace(/(\d+)-(\d+)/g, "$1 to $2");
+}
+function flushSpeech(t) {
+    if (!S.speech.length) return;
+    if (t - S.speechAt < SPEECH_QUIET_MS && t - S.speechSince < SPEECH_MAX_HOLD_MS) return;
+    const text = S.speech.join(". ");
+    S.speech = [];
+    try { announce(text); } catch (_e) { S.stats.errors++; }
+}
+
+const MPC_MODE_SPOKEN = ["Main", "Step Seq", "Track Mute", "Pad Mute"];
+const MODE_SPOKEN = ["Clip matrix", "Clip matrix, transposed", "Pads", "Notes"];
+function qlinkPageSpoken() {
+    if (S.mpcMode === 1) return "Q-Links: step " + (S.qlinkPage ? "9 to 16" : "1 to 8") + " velocities";
+    return ["Q-Links 1 to 8", "Q-Links 9 to 16", "Q-Links columns 1 and 2", "Q-Links columns 3 and 4"][S.qlinkPage] || "";
+}
+function padBankSpoken() { return "Banks " + L.bankLetter(S.padBank) + " and " + L.bankLetter(S.padBank + 1); }
+function menuTitle(m) { return m === "setup" ? "Setup" : m === "tempo" ? "Tempo" : "Keys and Scales"; }
+function menuItemSpoken() {
+    if (S.menu === "tempo") return S.bpm.toFixed(1) + " BPM";
+    const it = menuItems()[S.menuSelected];
+    return it ? it.label.replace("StepSeqJog", "Step Seq jog") + ": " + it.value : "";
+}
+
+/* Speak what changed since the last tick, whichever side changed it (a Move
+ * press or the MPC itself): the connection, then, while connected, the mode,
+ * the MPC's mode, the Q-Link page, the pad banks, and the open menu. */
+function speakChanges(t) {
+    if (S.conn !== S.said.conn) {
+        /* Hold "connected" until the first STATE (or half a second), so it and
+         * the mode go out as one announcement. */
+        if (S.conn === "connected" && !S.gotState) {
+            if (!S.connSeenAt) S.connSeenAt = t;
+            if (t - S.connSeenAt < 500) return;
+        }
+        S.connSeenAt = 0;
+        S.said = { conn: S.conn };
+        say(S.conn === "connected" ? "Connected to MPC"
+            : S.conn === "connecting" ? "Move MPC Control. Connecting to MPC"
+            : S.connNote || "No MPC");
+        if (S.conn !== "connected") return;
+    }
+    if (S.conn !== "connected" || !S.gotState) return;
+    const said = S.said;
+    const first = said.mode === undefined;   /* just connected: the mode, the MPC's if not Main, the track */
+    const mpcMode = S.popup ? "16 Levels" : MPC_MODE_SPOKEN[S.mpcMode] || "";
+    if (mpcMode !== said.mpcMode) {
+        if (!(first && mpcMode === "Main")) say(mpcMode);
+        said.mpcMode = mpcMode;
+    }
+    if (S.mode !== said.mode) {
+        say(S.mode === P.MODES.NOTES ? "Notes, " + N.describe(S.notes) : MODE_SPOKEN[S.mode]);
+        said.mode = S.mode;
+        said.padBank = undefined;
+    }
+    /* The bar, once Notes is up (the Move pages it itself); not on entry, where the mode says enough. */
+    const bar = notesEntry() ? S.noteBar : undefined;
+    if (bar !== said.bar) {
+        if (bar !== undefined && said.bar !== undefined) say("Bar " + (bar + 1));
+        said.bar = bar;
+    }
+    /* Step Seq's knob parameter, when the MPC's screen changes it. */
+    const param = stepParam();
+    if (param !== said.param) {
+        if (param && said.param) say("Knobs: " + param);
+        said.param = param;
+    }
+    if (S.mode === P.MODES.PADS && S.padBank !== said.padBank) {
+        say(padBankSpoken());
+        said.padBank = S.padBank;
+    }
+    const page = qlinkPageSpoken();
+    if (page !== said.page) {
+        if (!first) say(page);
+        said.page = page;
+    }
+    /* The current track: what the jog changes, and otherwise silent. */
+    if (S.text[0] !== said.track) {
+        if (S.text[0]) say("Track " + S.text[0]);
+        said.track = S.text[0];
+    }
+    /* Shift + jog in Step Seq; inside the Setup menu the menu line says it. */
+    if (S.jogDial !== said.jogDial && said.jogDial !== undefined && S.mpcMode === 1 && !S.menu) say("Jog Dial: " + (S.jogDial === "bars" ? "Bars" : "Q-Links"));
+    said.jogDial = S.jogDial;
+    if (S.menu !== said.menu) {
+        if (S.menu) say(menuTitle(S.menu) + ". " + menuItemSpoken());
+        else if (said.menu) say(menuTitle(said.menu) + " closed");
+        said.menu = S.menu;
+        said.menuItem = menuItemSpoken();
+    } else if (S.menu) {
+        const item = menuItemSpoken();
+        if (item !== said.menuItem) { say(item); said.menuItem = item; }
+    }
 }
 
 /* ================= session lifecycle ================= */
@@ -162,6 +286,7 @@ function startSession(t) {
     S.helloAt = t; S.lastPingAt = t;
     S.shift = false; S.jogTouched = false;
     S.touched.fill(false); S.touchOrder = [];
+    S.stepHolds.clear(); S.lastClipPad = { pad: -1, at: -1e9 };
     S.held.clear(); S.noteHolders.clear(); S.pressure.clear(); S.consumed.clear();
     asm.reset();
     sendHello(t);
@@ -171,6 +296,8 @@ function startSession(t) {
      * Paint again once it has settled. */
     S.repaintAt = [t + 400, t + 1200];
     S.dirty = true;
+    /* Entry: say everything afresh ("Connecting", then the mode once connected). */
+    S.said = {}; S.speech = []; S.connSeenAt = 0;
 }
 
 /* Module parked or exiting: release what we hold, then BYE. Once. */
@@ -186,7 +313,7 @@ function clearMpcView() {
     S.pads.fill(null); S.rows.fill(null); S.steps.fill(null);
     S.qlink.fill(null);
     S.mpcMode = 4; S.position = null; S.armed = S.noteRepeat = false; S.automation = 0;
-    S.gotState = false;
+    S.gotState = false; S.noteSteps = null; S.stepHolds.clear();
     S.dirty = true;
 }
 
@@ -215,6 +342,7 @@ function handleMsg(m, t) {
         S.conn = "connected"; S.connNote = "";
         S.lastPingAt = t;
         S.welcomeFlags = m.flags;
+        if (S.noteBar) sendMsg(P.encodeNoteBar(S.noteBar));   /* the MPC's default is bar 0 */
         if (!S.preferencesLoaded) {
             loadPreferences(); S.preferencesLoaded = true;
             if (S.clipLayout === 1) sendMsg(P.encodeSetMode(1));
@@ -240,6 +368,7 @@ function handleMsg(m, t) {
              * stayed dark until the tool was reloaded (bench, 2026-11-14): resend
              * them all, now and once the new colours have arrived. */
             if (m.mpcMode !== S.mpcMode) S.repaintAt = [t + 40, t + 250, t + 700];
+            if (m.mpcMode !== 0) S.stepHolds.clear();
             S.mpcMode = m.mpcMode; S.automation = m.automation; S.available = m.available; S.bpm = m.bpm;
             if (m.mode < 2 && m.mode !== S.clipLayout) { S.clipLayout = m.mode; savePreferences(); }
             S.playing = m.playing; S.recording = m.recording; S.overdubbing = m.overdubbing;
@@ -247,6 +376,10 @@ function handleMsg(m, t) {
             S.globalCols = m.globalCols; S.globalRows = m.globalRows;
             S.canLeft = m.canLeft; S.canRight = m.canRight; S.canUp = m.canUp; S.canDown = m.canDown;
             S.gotState = true;
+            break;
+        case "note_steps":
+            /* Only the bar on screen; a late reply for the one before is stale. */
+            if (m.bar === S.noteBar) S.noteSteps = { on: new Set(m.on), cov: new Set(m.cov) };
             break;
         case "position": S.position = { ...m, at: t }; break;
         case "pads":
@@ -264,13 +397,13 @@ function handleMsg(m, t) {
             /* "@Lane A01": the MPC's own lane, read on entering Step Seq; stored, never flashed. */
             if (m.slot === 2 && /^@Lane [A-H]\d\d$/.test(m.text)) { S.lane = m.text.slice(6); S.dirty = true; break; }
             /* A pick from the Move: stored too, and not flashed either; the bottom line says it (Ryan, 2026-11-14). */
-            if (m.slot === 2 && /^Lane [A-H]\d\d$/.test(m.text)) { S.lane = m.text.slice(5); S.dirty = true; break; }
+            if (m.slot === 2 && /^Lane [A-H]\d\d$/.test(m.text)) { S.lane = m.text.slice(5); say(m.text); S.dirty = true; break; }
             if (m.slot === 2 && m.text === "No lane") S.lane = "";
             S.text[m.slot] = m.text;
             if (m.slot === 2 && m.text.startsWith("Q-Links ")) { if (pageListWanted()) S.pageListUntil = t + CFG.PAGE_LIST_MS; break; }
             /* A bare mode name is never shown: the pads say which mode it is (Ryan). */
             if (m.slot === 2 && P.MODE_NAMES.includes(m.text)) break;
-            if (m.slot === 2) S.text2Until = t + CFG.TRANSIENT_MS;
+            if (m.slot === 2) { S.text2Until = t + CFG.TRANSIENT_MS; say(m.text); }
             break;
         case "qlink": {
             const old = S.qlink[m.knob];
@@ -288,6 +421,7 @@ function handleMsg(m, t) {
 function setMode(m) {
     if (m === S.mode) return;
     releaseAllHeld();
+    S.stepHolds.clear();
     S.mode = m;
     S.dirty = true;
 }
@@ -308,10 +442,22 @@ function padDown(p, vel) {
         const count = S.noteHolders.get(key) || 0;
         if (count === 0) sendMsg(P.encodeNoteOn(ch, note, vel));
         S.noteHolders.set(key, count + 1);
-        S.held.set(p, { ch, note });
+        S.held.set(p, { ch, note, vel });
+        /* A step is held: the pad sounds, and its note goes onto that step too. */
+        const target = stepTarget();
+        if (CFG.NOTE_LOG) console.log(`move-mpc-control note: pad ${p} note=${note} target=${target ? target.abs : "none"} holds=${S.stepHolds.size}`);
+        if (target) { sendMsg(P.encodeNoteAdd(target.abs, note, vel)); target.used = true; }
     } else {
         sendMsg(P.encodePadDown(p, vel));
         S.held.set(p, { pad: true });
+        /* Matrix / Transposed: the same pad twice quickly asks for a clip there; the MPC decides if the slot is empty. */
+        if (S.mode < P.MODES.PADS) {
+            const t = now(), last = S.lastClipPad;
+            if (last.pad === p && t - last.at <= CFG.DOUBLE_TAP_MS) {
+                sendMsg(P.encodeClipCreate(p));
+                S.lastClipPad = { pad: -1, at: -1e9 };   /* a third tap starts afresh */
+            } else S.lastClipPad = { pad: p, at: t };
+        }
     }
 }
 
@@ -374,6 +520,7 @@ function release(key) {
 
 function stepDown(i, t) {
     const key = "step" + i;
+    if (CFG.NOTE_LOG) console.log(`move-mpc-control note: stepDown ${i} mode=${S.mode} mpcMode=${S.mpcMode} menu=${S.menu} shift=${S.shift}`);
     if (S.shift) {
         // Local menus own only their native shortcuts. All other shifted
         // steps are deliberately silent; MPC receives the supported actions.
@@ -391,11 +538,68 @@ function stepDown(i, t) {
         if (bit && (S.available & bit)) pressCommand(key, P.CC.STEP0 + i);
         return;
     }
+    if (notesEntry()) { noteStepDown(i); return; }
     pressCommand(key, P.CC.STEP0 + i);
 }
 
 function stepUp(i) {
+    const hold = S.stepHolds.get(i);
+    if (hold) {
+        S.stepHolds.delete(i);
+        /* Tap clears (Ryan, 2026-11-23): a hold that did nothing. */
+        if (hold.target && !hold.used) sendMsg(P.encodeNoteClear(hold.abs));
+        S.dirty = true;
+        return;
+    }
     release("step" + i);
+}
+
+/* Notes entry applies in Main with the Move's own Notes layout and no menu
+ * over it; Step Seq and the mute modes keep the v4 step buttons. */
+/* The Step Seq's parameter, as its Q-Links name it: "STEP 1\nRATCHET" on the
+ * MPC, "STEP 1 RATCHET" on the wire (the script sends control characters as
+ * spaces). Chosen on the MPC's screen, which no script can change (bench
+ * 2026-11-24). "" when no knob names one, so the header keeps the view. */
+/* The header has the room of "Pads A|B" after "Step Seq"; speech says it in full. */
+const STEP_PARAM_SHORT = { Probability: "Prob." };
+function stepParam() {
+    if (S.mpcMode !== 1) return "";
+    for (const q of S.qlink) {
+        const m = q && typeof q.name === "string" ? /^STEP \d+\s+([A-Za-z].*)$/.exec(q.name) : null;
+        if (m) return m[1].charAt(0) + m[1].slice(1).toLowerCase();
+    }
+    return "";
+}
+
+/* Any MPC screen but Step Seq and the mute modes: Main (0) or another (4:
+ * Grid View, Clip Matrix, ... — where the first v5 bench found it). */
+function notesEntry() { return S.mode === P.MODES.NOTES && (S.mpcMode === 0 || S.mpcMode === 4) && !S.menu; }
+
+function stepTarget() {
+    for (const h of S.stepHolds.values()) if (h.target) return h;
+    return null;
+}
+
+/* A plain step in Notes entry. The first one down is the target (its absolute
+ * index is fixed now, so paging bars does not move it); a later one to its
+ * right sets the length; pads already down go onto it at once. */
+function noteStepDown(i) {
+    const abs = S.noteBar * 16 + i;
+    const target = stepTarget();
+    if (target) {
+        if (abs > target.abs) { sendMsg(P.encodeNoteLength(target.abs, abs - target.abs + 1)); target.used = true; }
+        S.stepHolds.set(i, { abs, target: false, used: true });
+        return;
+    }
+    if (S.stepHolds.size) { S.stepHolds.set(i, { abs, target: false, used: true }); return; }
+    const hold = { abs, target: true, used: false };
+    S.stepHolds.set(i, hold);
+    for (const h of S.held.values()) {
+        if (h.pad) continue;
+        sendMsg(P.encodeNoteAdd(abs, h.note, h.vel));
+        hold.used = true;
+    }
+    S.dirty = true;
 }
 
 function notesArrow(cc, t) {
@@ -412,11 +616,15 @@ function notesArrow(cc, t) {
     } else {
         const d = cc === M.RIGHT ? 1 : -1;
         if (S.shift) {
-            n.scale = (n.scale + d + N.SCALES.length) % N.SCALES.length;
-        } else {
             n.root = (n.root + d + 12) % 12;
+            flash(N.describe(n), t);
+        } else {
+            /* Bars page here; the key is Shift + arrow, or the Keys & Scales menu (§12.4). */
+            const bar = Math.max(0, Math.min(7, S.noteBar + d));
+            if (bar === S.noteBar) return;
+            S.noteBar = bar; S.noteSteps = null; S.dirty = true;
+            sendMsg(P.encodeNoteBar(bar));
         }
-        flash(N.describe(n), t);
     }
 }
 
@@ -448,6 +656,13 @@ function jog(v, t) {
     if (d === 0) return;
     if (S.menu === "tempo") { sendMsg(P.encodeValue(P.CC.TEMPO, v)); S.dirty = true; return; }
     if (S.menu) { S.menuSelected = Math.max(0, Math.min(menuItems().length - 1, S.menuSelected + (d > 0 ? 1 : -1))); S.dirty = true; return; }
+    /* A held step takes the jog for its length, one step per click, and the track stays (§12.4). */
+    const target = !S.shift && notesEntry() ? stepTarget() : null;
+    if (target) {
+        sendMsg(P.encodeNoteLengthNudge(target.abs, Math.max(-CFG.JOG_MAX_PER_TICK, Math.min(CFG.JOG_MAX_PER_TICK, d))));
+        target.used = true;
+        return;
+    }
     /* Step Seq (Ryan): the jog moves between bars, or between knob pages 1
      * and 2, by the "Jog Dial" setting; Shift + jog changes the setting. */
     if (S.mpcMode === 1) {
@@ -603,6 +818,17 @@ function clockStepSpec(i,t) {
         : (Math.floor(i/4) === Math.floor(sixteenth/4) ? 118 : 0));
 }
 
+/* Notes entry: what the MPC says is written on the shown bar, the beat clock
+ * on top while playing, and the held step bright. */
+function noteStepSpec(i, t) {
+    const target = stepTarget();
+    if (target && target.abs - S.noteBar * 16 === i) return solid(CFG.STEP_HELD);
+    const clock = clockStepSpec(i, t);
+    if (clock.s) return clock;
+    const ns = S.noteSteps;
+    return solid(ns && ns.on.has(i) ? CFG.STEP_ON : ns && ns.cov.has(i) ? CFG.STEP_COVERED : 0);
+}
+
 function notesPadSpec(p, pressedNotes) {
     const note = N.padNote(S.notes, p);
     if (note < 0) return solid(0);
@@ -630,7 +856,8 @@ function updateLeds(t) {
         leds.set(noteKey(L.padNoteOf(p)), playDark() ? solid(0) : held16 ? solid(120) /* palette white */ : notes ? notesPadSpec(p, pressedNotes) : specFor(e, opts));
     }
     for (let i = 0; i < 16; i++) {
-        const o = S.shift ? shiftStepSpec(i) : S.mode >= 2 && S.mpcMode !== 1 ? clockStepSpec(i,t) : specFor(S.steps[i], opts);
+        const o = S.shift ? shiftStepSpec(i) : notesEntry() ? noteStepSpec(i, t)
+            : S.mode >= 2 && S.mpcMode !== 1 ? clockStepSpec(i,t) : specFor(S.steps[i], opts);
         leds.set(noteKey(L.STEP_NOTE0 + i), o);
     }
     for (let r = 0; r < 4; r++) leds.set(ccKey(L.rowButtonCC(r)), specFor(S.rows[r], opts));
@@ -784,8 +1011,11 @@ function draw(t) {
     const pageList = S.pageListUntil > t;
     drawScreen(gfx, {
         conn: S.conn, connNote: S.connNote, mode: S.mode, modeName: P.MODE_NAMES[S.mode],
-        context: playDark() ? "" : S.mpcMode === 1 ? "Step Seq  " + (clip ? shortLayout : view) : view,
-        window: S.mpcMode === 1 || S.popup ? "" : clipWindow,
+        /* Step Seq: the knobs' parameter (Velocity, Ratchet, ...) in place of the view (Ryan, 2026-11-24). */
+        context: playDark() ? "" : S.mpcMode === 1 ? "Step Seq  " + (STEP_PARAM_SHORT[stepParam()] || stepParam() || (clip ? shortLayout : view)) : view,
+        /* Notes mode's bar for step entry sits where the clip window does in the
+         * clip modes: the detail line above gives way to the track description. */
+        window: S.mpcMode === 1 || S.popup ? "" : S.mode === P.MODES.NOTES ? 'Bar ' + (S.noteBar + 1) : clipWindow,
         trackName: S.text[0],
         subtitle: S.text[1],
         /* Step Seq: the lane bottom left once the Move has picked one (the MPC's own lane is not readable), the jog setting bottom right (Ryan). */
@@ -863,6 +1093,8 @@ globalThis.tick = function () {
         S.tickNo++;
         if (S.repaintAt && S.repaintAt.length && t >= S.repaintAt[0]) { S.repaintAt.shift(); leds.invalidate(); }
         timers(t);
+        speakChanges(t);
+        flushSpeech(t);
         updateLeds(t);
         leds.drain(S.tickNo, sendLed);
         const animated = S.playing && !!S.position || S.shift || ((S.mode === 0 || S.mode === 1) && CFG.SCREEN.REST_CLIP === 'minimap'
@@ -898,6 +1130,12 @@ globalThis.onMidiMessageExternal = function (data) {
     try {
         if (!S || S.parked || !data || data.length < 1) return;
         const t = now();
+        /* Cable 2 is shared by the MPC's link (USB-C) and the USB-A port. The
+         * MPC script sends only SysEx, so a channel-voice fragment is from a
+         * USB-A device or an MPC track routed to the Move: keep it out of the
+         * assembler, where it would abort an MPC message (bench 2026-11-23). */
+        const st = data[0] & 0xFF;
+        if (st >= 0x80 && st < 0xF0) { S.stats.extVoice++; return; }
         for (const msg of asm.feed(data)) handleMsg(P.decode(msg), t);
     } catch (_e) { if (S) S.stats.errors++; }
 };

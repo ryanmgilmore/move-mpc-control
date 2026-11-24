@@ -6,7 +6,7 @@
       "lines": [
         "MPC 3.10.1+ by USB.",
         "Needs the MPC",
-        "script, protocol 4.",
+        "script, protocol 5.",
         "Back: menu, Main,",
         "then parks.",
         "Back twice: park.",
@@ -75,6 +75,7 @@
         "launch scene",
         "Transp rows:",
         "track, S: stop",
+        "Pad twice: new clip",
         "Matrix steps:",
         "odd select track,",
         "even stop it",
@@ -93,11 +94,25 @@
         "Pads L/R: banks",
         "Notes Up/Down:",
         "octave",
-        "L/R: root",
-        "S+L/R: scale",
+        "S+L/R: root",
         "S+Up/Down: channel",
-        "S+Step9: layout",
+        "S+Step9: key, scale,",
+        "layout",
         "Steps: beat clock"
+      ]
+    },
+    {
+      "title": "Notes: steps",
+      "lines": [
+        "L/R: bar 1-8",
+        "Hold step + pad:",
+        "add the note",
+        "Hold step + jog:",
+        "its length",
+        "Hold + later step:",
+        "set length",
+        "Tap step: clear",
+        "Lit: note, dim: tail"
       ]
     },
     {

@@ -1,7 +1,7 @@
 {
     "id": "move-mpc-control",
     "name": "Move MPC Control",
-    "version": "0.1.0",
+    "version": "0.3.0",
     "abbrev": "MPC",
     "author": "Ryan Gilmore",
     "description": "The Move as pads, clip launcher, step sequencer and Q-Link knobs for an Akai MPC (3.10.1+) over one USB cable. Needs the Ableton Move (Schwung) script on the MPC.",

@@ -1,4 +1,7 @@
 {
     "test": { "include": ["test/"] },
-    "lint": { "include": ["src/"] }
+    "lint": { "include": ["src/"] },
+    "imports": {
+        "/data/UserData/schwung/shared/screen_reader.mjs": "./test/screen_reader_stub.mjs"
+    }
 }

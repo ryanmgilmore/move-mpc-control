@@ -30,6 +30,7 @@ plugin, or patched firmware on the MPC.
 - [Setup menu](#setup-menu)
 - [How it works](#how-it-works)
 - [Known limitations](#known-limitations)
+- [Changelog](#changelog)
 - [More help](#more-help)
 - [About this project](#about-this-project)
 
@@ -176,6 +177,7 @@ shortcuts are available.
 | Control | Does |
 |---|---|
 | **Pad** | Select and launch that clip |
+| **Pad twice, quickly** | On an empty slot: a new clip there, at the MPC's default length |
 | **Arrows** | Move the window by one. **Shift + arrows**: by a page. In Transposed, Left / Right move through clips and Up / Down through tracks |
 | **Row buttons** | Matrix: launch that scene. Transposed: select that track; **Shift**: stop it. The current track's button is white |
 | **Steps** | Matrix: odd steps select a track and even steps stop it (1-2 are the first track, through 15-16 for the eighth). Transposed: each odd step launches the scene in the pad column above it (step 1 the first, through step 15 the eighth), and step 16 stops all clips |
@@ -199,10 +201,17 @@ While the MPC plays, the 16 steps show a beat clock on both kinds of track
 | Control | Does |
 |---|---|
 | **Up / Down** | Octave |
-| **Left / Right** | Root note |
-| **Shift + Left / Right** | Scale |
+| **Left / Right** | Bar for step entry, 1-8 (shown bottom right) |
+| **Shift + Left / Right** | Root note |
 | **Shift + Up / Down** | MIDI channel, 1-15 |
 | **Shift + Step 9** | Keys & Scales: root, scale, and In-Key or Chromatic layout |
+| **Hold a step + pads** | Put those notes on that step (also: hold pads, then press a step) |
+| **Hold a step + jog** | Note length, one step per click (or press a later step: the note lasts to it) |
+| **Tap a step** | Clear the notes put there from the Move |
+
+Notes go into the MPC's selected clip. Only notes put there from the Move
+in this MPC session can be lengthened or cleared from it, and each note is
+its own Undo on the MPC.
 
 Twelve scales: Major, Minor, Dorian, Mixolydian, Lydian, Phrygian, Locrian,
 Harmonic Minor, Melodic Minor, Major and Minor Pentatonic, and Blues. In In-Key
@@ -227,8 +236,15 @@ steps and/or adjust their velocity.
 | **Pad** | Pick the lane, from the MPC's current pad bank. Pads in other banks are dark |
 | **Left / Right** | Previous / next bar |
 | **Jog** | Bars, or Q-Link pages 1 and 2, by the StepSeqJog setting. **Shift + jog** switches the setting |
-| **Q-Links** | Velocity for the associated step |
+| **Q-Links** | The step's velocity, ratchet, probability, or other parameter: whichever the MPC's Step Seq screen has chosen |
 | **Back** | Back to the MPC's Main |
+
+**Ratchet and probability.** Choose the parameter on the MPC's own Step Seq
+screen; the Move's top line then names it (`Step Seq  Ratchet`) and its knobs
+set it per step. A **ratchet** plays the step several times in quick
+succession (rolls, stutters); **probability** is the chance a step plays each
+time round. Both work on any drum kit. The Move cannot choose the parameter
+itself: the MPC offers no way for a script to.
 
 ### 16 Levels and Full Level
 
@@ -299,11 +315,54 @@ the link to the MPC is picked up again when you reopen it.
   do.
 - **Notes mode follows the MPC's MIDI input rules**, not the current track
   directly: with Multi Rec on, it plays whatever tracks are armed.
+- **Step entry edits only its own notes.** Notes put on steps from the Move in
+  the current MPC session can be lengthened and cleared from it; notes made
+  any other way, or changed on the MPC afterwards, cannot. A note past the
+  clip's end is written but does not play: a script cannot read a clip's
+  length.
+- **Step Seq's knob parameter (velocity, ratchet, probability, …) is
+  chosen on the MPC's screen**; the Move shows it but cannot change it.
+- **A keyboard on the Move's USB-A port does not reach the module**: Schwung
+  keeps its notes from tools by default.
 - **Not reachable from MPC 3.10.1's scripting**, so not offered:
   - doubling a clip's length;
   - the metronome's play mode;
   - the plugin's name on a plugin track;
   - pads brightening as they play in Main.
+
+## Changelog
+
+Both repositories release together: the module and the MPC script must be
+the same version (they check each other's protocol version and refuse to
+connect otherwise).
+
+### v0.3.0 (2026-11-23)
+
+- **Notes on steps from the Move**, in Notes mode: hold a step and play pads
+  (or hold pads, then press a step) to put those notes on it; hold a step and
+  turn the jog to set its length, one step per click, or press a later step;
+  tap a step to clear it. Steps with notes light white. Works in both the clip
+  and the sequence workflow.
+- **Left / Right page bars 1-8 in Notes mode.** The root note moved to
+  **Shift + Left / Right**; the scale is in Keys & Scales (Shift + Step 9).
+- **Pad twice, quickly, on an empty clip slot** makes a new clip there.
+- **Step Seq names the knobs' parameter** on the top line, such as Velocity,
+  Ratchet, or Prob. (the parameter is set on the MPC's Step Seq page, and the
+  Q-Links then control that parameter for each step). Ratchet and
+  probability per step work on any drum kit.
+- **Screen reader support**: the module speaks its state through Schwung's
+  screen reader.
+- A MIDI message from the Move's USB-A port no longer garbles a message from
+  the MPC.
+- Protocol 5: install both new releases together.
+
+### v0.2.0
+
+Not released: its features ship in v0.3.0.
+
+### v0.1.0 (2026-11-19)
+
+First release.
 
 ## Removing
 
